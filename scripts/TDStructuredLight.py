@@ -17,6 +17,8 @@ class TDStructuredLight(CallbacksExt):
         # the component to which data is stored
         self.dataComp = ownerComp.op('data')
 
+        print(cv2.__version__)
+
         # set up structured light grey code patterns
         self.structured_light_gcp = None
         self.patterns_gcp = []
@@ -114,6 +116,29 @@ class TDStructuredLight(CallbacksExt):
         #print(capture_folder)
         pass
 
+    def CaptureAll(self):
+        self.ownerComp.par.Patternindex = 0
+        self.captureLoop()
+
+    def captureLoop(self):
+        index = self.ownerComp.par.Patternindex.eval()
+        self.output_pattern(self.patterns_gcp, index)
+        self._future('captureAndContinue', delayFrames=2)
+
+    def captureAndContinue(self):
+        index = self.ownerComp.par.Patternindex.eval()
+        self.capture(index)
+        n_patterns = len(self.patterns_gcp)
+        index += 1
+        if index < n_patterns:
+            self.ownerComp.par.Patternindex = index
+            self._future('captureLoop', delayFrames=2)
+            return
+        
+        print('capture complete')
+        return
+
+
     def load_captured_images(self):
         captures_folder = project.folder + '/' + self.ownerComp.par.Captures.eval()
         captured_images = []
@@ -129,13 +154,40 @@ class TDStructuredLight(CallbacksExt):
                 file_path = os.path.join(captures_folder, file_name)
 
                 # Load the image
-                image = cv2.imread(file_path, cv2.IMREAD_UNCHANGED)
+                image = cv2.imread(file_path, cv2.IMREAD_GRAYSCALE)
                 if image is not None:
                     captured_images.append(image)
                 else:
                     print(f"Failed to load image: {file_name}")
 
         return captured_images
+
+    def output_decoded(self, decoded_cols, decoded_rows, mask):
+        # Normalize decoded_cols and decoded_rows for visualization
+        norm_decoded_cols = cv2.normalize(decoded_cols, None, 0, 255, cv2.NORM_MINMAX)
+        norm_decoded_rows = cv2.normalize(decoded_rows, None, 0, 255, cv2.NORM_MINMAX)
+    
+        # Convert to 8-bit images
+        vis_decoded_cols = np.uint8(norm_decoded_cols)
+        vis_decoded_rows = np.uint8(norm_decoded_rows)
+        vis_mask = np.uint8(mask * 255)
+    
+        # Pack into an RGB image
+        rgb_image = cv2.merge([vis_decoded_cols, vis_decoded_rows, vis_mask])
+    
+        self.pattern_img = rgb_image
+        self.pattern_top.cook(force=True)
+
+    def Test_read(self):
+        captures_folder = project.folder + '/' + self.ownerComp.par.Captures.eval()
+        test_image_path = captures_folder + '/capture_0.tiff'
+        test_image = cv2.imread(test_image_path, cv2.IMREAD_GRAYSCALE)
+        if test_image is not None:
+            cv2.imshow("Test Image", test_image)
+            cv2.waitKey(0)
+            cv2.destroyAllWindows()
+        else:
+            print("Failed to load image")
 
     def decode_images(self):
         captured_images = self.load_captured_images()
@@ -145,22 +197,40 @@ class TDStructuredLight(CallbacksExt):
 
         # Convert the captured images to the format expected by OpenCV
         # OpenCV often expects images in a list of lists where each inner list contains one channel of the image.
-        images_list = [ [img] for img in captured_images ]
+        images_list = [ [img] for img in  captured_images ]
 
         # Prepare containers for decoded information
-        width, height = captured_images[0].shape[:2]
+        width, height = (1280,720)#captured_images[0].shape[:2]
         decoded_cols = np.zeros((height, width), np.uint16)
         decoded_rows = np.zeros((height, width), np.uint16)
+        disparityMap = np.zeros((height, width), np.float32)
 
+        print(len(images_list))
         # Perform the decoding
         # The decode function returns a mask indicating valid decoded pixels.
-        mask, decoded_cols, decoded_rows = self.structured_light_gcp.decode(images_list, decoded_cols, decoded_rows)
+    
+        success, decoded, shadow_masks = self.structured_light_gcp.decode(captured_images)
 
-        # Convert the decoded rows and columns into a depth map or point cloud as needed
-        # This conversion is specific to your setup and may require calibration data
-        depth_map = self.convert_to_depth(decoded_cols, decoded_rows, mask)
+        try:
+            # Use the grayscale images for decoding
+            #mask, decoded_cols, decoded_rows = self.structured_light_gcp.decode(images_list, disparityMap)
+            success, decoded, shadow_masks = self.structured_light_gcp.decode(images_list, None, cv2.structured_light.DECODE_3D_UNDERWORLD)
 
-        return depth_map
+            #self.output_decoded(decoded_cols, decoded_rows, mask)
+            # Convert the decoded rows and columns into a depth map or point cloud as needed
+            # This conversion is specific to your setup and may require calibration data
+            depth_map = self.convert_to_depth(decoded_cols, decoded_rows, mask)
+        
+        except Exception as e:
+            print(f"Decoding error: {e}")
+            print("Number of images:", len(images_list))
+            print("Image shapes:", [img[0].shape for img in images_list])
+            # Add additional diagnostics if necessary
+       
+
+
+
+        return
 
     def convert_to_depth(self, decoded_cols, decoded_rows, mask):
         # This function should convert the decoded rows and columns into depth information.
@@ -196,3 +266,6 @@ class TDStructuredLight(CallbacksExt):
     def pulse_Capture(self):
         index = self.ownerComp.par.Patternindex.eval()
         self.capture(index)
+
+    def pulse_Decode(self):
+        self.decode_images()
